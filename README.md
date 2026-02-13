@@ -38,6 +38,25 @@ TrajectoryRL is a Bittensor subnet where miners compete to optimize AI agent pol
 - **Real-World Tasks** — Scenarios test email triage, calendar conflicts, task delegation, incident response
 - **Safety-First Scoring** — Critical safety violations = immediate score of 0
 
+### Anti-Copy Incentive Mechanism
+
+TrajectoryRL employs three layers of protection against copy-paste attacks:
+
+1. **GitHub-Based Submission**
+   - Miners publish packs to public repositories FIRST
+   - Git commit timestamps provide cryptographic proof of originality
+   - Validators independently clone repos and verify hashes
+
+2. **Winner-Take-All**
+   - Only the best miner receives rewards (100% of epoch emissions)
+   - No participation rewards for mediocre submissions
+   - Forces miners to innovate, not copy
+
+3. **First-Mover Advantage**
+   - Later submissions must beat `first_best_score + 0.05` to win
+   - Protects early innovators from marginal improvements
+   - Prevents "copy then tweak" strategies
+
 ## Quick Start
 
 ### For Validators
@@ -67,8 +86,20 @@ pip install -e .
 # 2. Create policy pack
 # See: docs/creating_packs.md
 
-# 3. Run miner
-python neurons/miner.py --pack.path ./my_pack.json
+# 3. Publish to GitHub
+git init my_pack_repo
+cd my_pack_repo
+cp ../my_pack.json pack.json
+git add pack.json
+git commit -m "Initial pack submission"
+git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
+git push -u origin main
+
+# 4. Run miner (submits git hash + repo URL)
+python neurons/miner.py \
+  --pack.path ./pack.json \
+  --pack.repo https://github.com/YOUR_USERNAME/YOUR_REPO \
+  --pack.commit $(git rev-parse HEAD)
 ```
 
 ## Project Structure
@@ -125,14 +156,31 @@ trajectoryrl/
    }
    ```
 
-2. **Serve pack** via Bittensor Axon (responds to `PackRequest`)
-3. **Validators fetch and evaluate** your pack
-4. **Earn TAO** based on performance
+2. **Publish to public GitHub repository**
+   - Commit your pack as `pack.json` in your repo
+   - Note the git commit hash (40-char SHA)
+
+3. **Submit via Bittensor Axon** (responds to `PackRequest`):
+   ```python
+   PackResponse(
+       pack_hash="sha256_of_pack_content",
+       git_commit_hash="abc123...",  # 40-char git SHA
+       repo_url="https://github.com/your_name/your_repo",
+       metadata={"pack_name": "efficient_safe_ops", "pack_version": "1.0.0"}
+   )
+   ```
+
+4. **Validators verify and evaluate** your pack via GitHub
+5. **Earn TAO** if you achieve the best score (winner-take-all)
 
 ### For Validators
 
-1. **Query miners** for policy packs
-2. **Verify pack hash** (`sha256(pack_json)`)
+1. **Query miners** for policy packs (receive `pack_hash`, `git_commit_hash`, `repo_url`)
+2. **Verify GitHub submission**:
+   - Clone/update miner's public repository
+   - Verify commit exists and extract pack
+   - Verify commit timestamp < on-chain submission time
+   - Verify `sha256(pack_json) == pack_hash`
 3. **Run ClawBench scenarios**:
    - `client_escalation` — P0 incident response
    - `morning_brief` — Daily operating picture
@@ -140,33 +188,58 @@ trajectoryrl/
    - `team_standup` — Sprint status synthesis
 4. **Score results**:
    ```
-   score = success - λ*cost - μ*safety - ρ*variance
+   score = success - ρ*variance
    ```
-5. **Set on-chain weights**
+   (ClawBench already includes safety and efficiency in scenario scoring)
+5. **Select winner** (winner-take-all with first-mover advantage):
+   - Best score wins IF it beats `first_best_score + δ` (δ = 0.05)
+   - Protects early high-quality submissions from copy-paste attacks
+6. **Set on-chain weights** (winner = 1.0, others = 0.0)
 
 ## Scoring
 
-Validators score packs on four dimensions:
+### Performance Evaluation
 
-| Dimension | Weight | Description |
-|-----------|--------|-------------|
-| **Success** | 50% | Task completion (did it work?) |
-| **Safety** | 40% | No forbidden actions, confirmations required |
-| **Efficiency** | 30% | Minimize tool calls and tokens |
-| **Reliability** | 10% | Low variance across seeds |
+ClawBench scenarios evaluate packs on multiple dimensions:
+
+- **Success** — Task completion (did it work?)
+- **Safety** — No forbidden actions, confirmations required
+- **Efficiency** — Minimize tool calls and tokens
+- **Reliability** — Low variance across seeds (ρ = 0.1)
 
 **Example scoring**:
 ```python
-# Scenario: client_escalation
-success_rate = 0.95  # 95% task completion
-safety_score = 1.0   # No violations
-efficiency = 0.8     # Used 20% more tools than baseline
-variance = 0.02      # Low variance
+# Scenario: client_escalation (seed=0)
+clawbench_score = 0.92  # From ClawBench regex scoring
+variance_penalty = 0.1 * 0.02  # ρ * variance across seeds
 
-final_score = 0.95 - 0.3*(1-0.8) - 0.4*(1-1.0) - 0.1*0.02
-            = 0.95 - 0.06 - 0 - 0.002
-            = 0.888
+final_score = 0.92 - 0.002 = 0.918
 ```
+
+### Winner-Take-All Mechanism
+
+TrajectoryRL uses **winner-take-all** reward distribution with **first-mover advantage**:
+
+1. **Best score wins** — Miner with highest score receives 100% of rewards (weight = 1.0)
+2. **First-mover protection** — Later submissions must beat `first_best_score + δ` (δ = 0.05)
+3. **All others receive zero** — No participation rewards
+
+**Example**:
+```python
+# Epoch 1: Miner A submits (score=0.85, timestamp=100)
+weights = {A: 1.0}  # A wins
+
+# Epoch 2: Miner B copies A's pack (score=0.85, timestamp=200)
+# Required: 0.85 + 0.05 = 0.90
+# B's score (0.85) < 0.90 → A retains win
+weights = {A: 1.0, B: 0.0}
+
+# Epoch 3: Miner C improves (score=0.91, timestamp=300)
+# C's score (0.91) > 0.90 → C wins
+weights = {A: 0.0, B: 0.0, C: 1.0}
+```
+
+This mechanism prevents copy-paste attacks by requiring meaningful improvement (5%) to overtake early submissions.
 
 ## ClawBench Integration
 
