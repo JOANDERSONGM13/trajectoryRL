@@ -5,7 +5,6 @@ Based on Bittensor synapse patterns:
 - https://docs.learnbittensor.org/tutorials/ocr-subnet-tutorial
 """
 
-import base64
 import hashlib
 import json
 from typing import Any, Dict, Optional
@@ -43,12 +42,12 @@ class PackRequest(bt.Synapse):
 
 
 class PackResponse(bt.Synapse):
-    """Miner returns their policy pack (content-addressed).
+    """Miner returns their policy pack (GitHub-based submission).
 
     Attributes:
         pack_hash: SHA256 hash of the pack JSON (hex digest)
-        pack_b64: Base64-encoded pack JSON (if small enough)
-        pack_url: URL to fetch pack (if want_pointer_ok=True and pack is large)
+        git_commit_hash: Git commit SHA from public repository
+        repo_url: Public GitHub repository URL
         metadata: Declared pack metadata (not verified by validator)
     """
 
@@ -56,13 +55,13 @@ class PackResponse(bt.Synapse):
         default="",
         description="SHA256 hash of pack content (hex digest)"
     )
-    pack_b64: Optional[str] = Field(
-        default=None,
-        description="Base64-encoded pack JSON (inline)"
+    git_commit_hash: str = Field(
+        default="",
+        description="Git commit SHA from public repository (40-char hex)"
     )
-    pack_url: Optional[str] = Field(
-        default=None,
-        description="URL to fetch pack (for large packs)"
+    repo_url: str = Field(
+        default="",
+        description="Public GitHub repository URL (e.g., https://github.com/user/repo)"
     )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -79,39 +78,26 @@ class PackResponse(bt.Synapse):
             raise ValueError("pack_hash must be lowercase hex")
         return v.lower()
 
-    def verify_hash(self) -> bool:
-        """Verify that pack_hash matches pack_b64 content.
+    @field_validator("git_commit_hash")
+    @classmethod
+    def validate_git_commit_hash(cls, v: str) -> str:
+        """Ensure git_commit_hash is a valid git SHA (40-char hex)."""
+        if v and len(v) != 40:
+            raise ValueError(f"git_commit_hash must be 40 hex chars, got {len(v)}")
+        if v and not all(c in "0123456789abcdef" for c in v.lower()):
+            raise ValueError("git_commit_hash must be lowercase hex")
+        return v.lower()
 
-        Returns:
-            True if hash matches content, False otherwise
-        """
-        if not self.pack_b64:
-            return False  # Can't verify without content
+    @field_validator("repo_url")
+    @classmethod
+    def validate_repo_url(cls, v: str) -> str:
+        """Ensure repo_url is a valid GitHub URL."""
+        if v and not v.startswith(("https://github.com/", "http://github.com/")):
+            raise ValueError("repo_url must be a GitHub URL")
+        return v
 
-        try:
-            content = base64.b64decode(self.pack_b64)
-            computed_hash = hashlib.sha256(content).hexdigest()
-            return computed_hash == self.pack_hash
-        except Exception:
-            return False
-
-    def extract_pack(self) -> Optional[dict]:
-        """Extract and parse pack from pack_b64.
-
-        Returns:
-            Parsed pack dict, or None if invalid
-        """
-        if not self.pack_b64:
-            return None
-
-        try:
-            content = base64.b64decode(self.pack_b64)
-            pack = json.loads(content)
-            return pack
-        except Exception:
-            return None
-
-    def compute_hash_from_pack(self, pack: dict) -> str:
+    @staticmethod
+    def compute_pack_hash(pack: dict) -> str:
         """Compute SHA256 hash from pack dict.
 
         Args:

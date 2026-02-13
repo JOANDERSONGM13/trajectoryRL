@@ -32,6 +32,7 @@ class ValidatorConfig:
         lambda_cost: Weight for cost penalty (0-1)
         mu_safety: Weight for safety penalty (0-1)
         rho_reliability: Weight for variance penalty (0-1)
+        delta_threshold: First-mover advantage threshold (0-1)
 
         # Pack caching
         pack_cache_dir: Directory for caching downloaded packs
@@ -72,6 +73,7 @@ class ValidatorConfig:
     lambda_cost: float = 0.3  # 30% weight on cost efficiency
     mu_safety: float = 0.4  # 40% weight on safety compliance
     rho_reliability: float = 0.1  # 10% weight on variance
+    delta_threshold: float = 0.05  # 5% first-mover advantage threshold
 
     # Pack caching
     pack_cache_dir: Path = field(

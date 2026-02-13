@@ -1,7 +1,6 @@
 """TrajectoryRL Validator - Main validator implementation."""
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
@@ -10,18 +9,17 @@ import time
 import yaml
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import bittensor as bt
 import numpy as np
 
-# Add parent dir to path to import shared protocol
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "shared"))
-from trajectoryrl_protocol import PackRequest, PackResponse, validate_opp_schema
-
-from .config import ValidatorConfig
-from .harness import ClawBenchHarness, EvaluationResult
-from .scoring import TrajectoryScorer, AggregatedScore
+from ..protocol.synapse import PackRequest, PackResponse
+from ..utils.opp_schema import validate_opp_schema
+from ..utils.config import ValidatorConfig
+from ..utils.clawbench import ClawBenchHarness, EvaluationResult
+from ..scoring import TrajectoryScorer, AggregatedScore
+from ..utils.github import GitHubVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +82,21 @@ class TrajectoryValidator:
             rho_reliability=config.rho_reliability
         )
 
+        # Initialize GitHub verifier
+        logger.info("Initializing GitHub verifier...")
+        self.github_verifier = GitHubVerifier(
+            cache_dir=config.log_dir / "git_cache"
+        )
+
         # Pack cache (content-addressed)
         self.pack_cache: Dict[str, dict] = {}
 
         # Score history for tracking
         self.score_history: Dict[int, List[float]] = defaultdict(list)
+
+        # First-mover tracking: {miner_uid: (first_score, first_timestamp)}
+        # Tracks the FIRST submission from each miner that achieved a given score level
+        self.first_mover_data: Dict[int, Tuple[float, float]] = {}
 
         # Load scenarios
         self.scenarios = self._load_scenarios()
@@ -222,14 +230,34 @@ class TrajectoryValidator:
             logger.warning(f"Miner {miner_uid}: Failed to fetch pack")
             return 0.0
 
-        # Step 2: Verify and cache
-        pack = self._verify_and_cache(pack_response)
-        if pack is None:
-            logger.warning(f"Miner {miner_uid}: Pack verification failed")
+        # Step 2: Verify GitHub submission
+        if not pack_response.git_commit_hash or not pack_response.repo_url:
+            logger.warning(
+                f"Miner {miner_uid}: Missing git_commit_hash or repo_url"
+            )
             return 0.0
 
+        verification = await self.github_verifier.verify_submission(
+            repo_url=pack_response.repo_url,
+            git_commit_hash=pack_response.git_commit_hash,
+            pack_hash=pack_response.pack_hash,
+            on_chain_submission_time=time.time()  # TODO: Get actual on-chain time
+        )
+
+        if not verification.valid:
+            logger.warning(
+                f"Miner {miner_uid}: GitHub verification failed: {verification.error}"
+            )
+            return 0.0
+
+        pack = verification.pack_content
+        commit_timestamp = verification.commit_timestamp
         pack_hash = pack_response.pack_hash[:8]
-        logger.info(f"Miner {miner_uid}: Got pack {pack_hash}")
+        logger.info(
+            f"Miner {miner_uid}: Got pack {pack_hash} "
+            f"(commit: {pack_response.git_commit_hash[:8]}, "
+            f"timestamp: {commit_timestamp})"
+        )
 
         # Step 3: Static lint
         lint_result = validate_opp_schema(pack)
@@ -278,6 +306,22 @@ class TrajectoryValidator:
         # Track history
         self.score_history[miner_uid].append(final_score)
 
+        # Update first-mover tracking
+        # If this miner doesn't have first-mover data, or improved their score, update it
+        if miner_uid not in self.first_mover_data:
+            self.first_mover_data[miner_uid] = (final_score, commit_timestamp)
+            logger.info(
+                f"Miner {miner_uid}: First submission recorded "
+                f"(score={final_score:.3f}, timestamp={commit_timestamp})"
+            )
+        elif final_score > self.first_mover_data[miner_uid][0]:
+            # Miner improved their score, update with new timestamp
+            self.first_mover_data[miner_uid] = (final_score, commit_timestamp)
+            logger.info(
+                f"Miner {miner_uid}: Score improved "
+                f"(new={final_score:.3f}, old={self.first_mover_data[miner_uid][0]:.3f})"
+            )
+
         return final_score
 
     async def _fetch_pack(self, miner_uid: int) -> Optional[PackResponse]:
@@ -314,80 +358,41 @@ class TrajectoryValidator:
             logger.warning(f"Failed to fetch pack from miner {miner_uid}: {e}")
             return None
 
-    def _verify_and_cache(self, response: PackResponse) -> Optional[dict]:
-        """Verify pack hash and cache.
-
-        Args:
-            response: PackResponse from miner
-
-        Returns:
-            Parsed pack dict, or None if invalid
-        """
-        # Check cache first
-        if response.pack_hash in self.pack_cache:
-            logger.debug(f"Pack {response.pack_hash[:8]} found in cache")
-            return self.pack_cache[response.pack_hash]
-
-        # Get content (inline or from URL)
-        if response.pack_b64:
-            try:
-                content = base64.b64decode(response.pack_b64)
-            except Exception as e:
-                logger.warning(f"Failed to decode pack_b64: {e}")
-                return None
-
-        elif response.pack_url:
-            logger.warning("pack_url not yet supported (TODO: implement URL fetch)")
-            return None
-
-        else:
-            logger.warning("No pack_b64 or pack_url provided")
-            return None
-
-        # Verify hash
-        actual_hash = hashlib.sha256(content).hexdigest()
-        if actual_hash != response.pack_hash:
-            logger.warning(
-                f"Hash mismatch: expected {response.pack_hash[:8]}, "
-                f"got {actual_hash[:8]}"
-            )
-            return None
-
-        # Parse JSON
-        try:
-            pack = json.loads(content)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse pack JSON: {e}")
-            return None
-
-        # Cache it
-        self.pack_cache[response.pack_hash] = pack
-        logger.debug(f"Cached pack {response.pack_hash[:8]}")
-
-        return pack
-
     async def _set_weights(self, scores: Dict[int, float]):
-        """Set on-chain weights based on scores.
+        """Set on-chain weights based on scores using winner-take-all.
 
         Args:
             scores: Dict of miner_uid -> score [0, 1]
         """
         logger.info(f"Setting weights for {len(scores)} miners...")
 
-        # Normalize to weights
-        weights_dict = self.scorer.normalize_scores_to_weights(scores)
+        # Select winner with first-mover advantage
+        weights_dict = self.scorer.select_winner(
+            scores=scores,
+            first_mover_data=self.first_mover_data,
+            delta=self.config.delta_threshold if hasattr(self.config, 'delta_threshold') else 0.05
+        )
 
         # Prepare for Bittensor API
         uids = list(weights_dict.keys())
         weights = [weights_dict[uid] for uid in uids]
 
-        logger.info("Weight distribution:")
+        # Find winner
+        winner_uid = max(weights_dict.keys(), key=lambda uid: weights_dict[uid])
+
+        logger.info("=" * 60)
+        logger.info("WINNER-TAKE-ALL RESULTS")
+        logger.info("=" * 60)
+        logger.info(f"🏆 Winner: Miner {winner_uid} (score={scores[winner_uid]:.3f})")
+        logger.info("-" * 60)
+        logger.info("All miners:")
         for uid, weight in sorted(
             weights_dict.items(),
-            key=lambda x: x[1],
+            key=lambda x: scores[x[0]],
             reverse=True
         ):
-            logger.info(f"  Miner {uid}: {weight:.4f} (score={scores[uid]:.3f})")
+            marker = "🏆 WINNER" if weight == 1.0 else ""
+            logger.info(f"  Miner {uid}: weight={weight:.4f}, score={scores[uid]:.3f} {marker}")
 
         # Set weights on chain
         try:

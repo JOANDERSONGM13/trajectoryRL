@@ -2,10 +2,10 @@
 
 import logging
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 
-from .harness import EvaluationResult
+from ..utils.clawbench import EvaluationResult
 
 logger = logging.getLogger(__name__)
 
@@ -143,12 +143,70 @@ class TrajectoryScorer:
 
         return final
 
+    def select_winner(
+        self,
+        scores: Dict[int, float],
+        first_mover_data: Dict[int, Tuple[float, float]],
+        delta: float = 0.05
+    ) -> Dict[int, float]:
+        """Select winner using winner-take-all with first-mover advantage.
+
+        Args:
+            scores: Dict of miner_uid -> score [0, 1]
+            first_mover_data: Dict of miner_uid -> (score, timestamp) for first submissions
+            delta: First-mover threshold (new score must beat best + delta)
+
+        Returns:
+            Dict of miner_uid -> weight (winner=1.0, others=0.0)
+        """
+        if not scores:
+            return {}
+
+        # Find current best score
+        best_uid = max(scores.keys(), key=lambda uid: scores[uid])
+        best_score = scores[best_uid]
+
+        # Apply first-mover protection
+        # If there's an earlier submission at this score level, check delta threshold
+        if first_mover_data:
+            # Find the earliest submission that's still competitive
+            for uid, (first_score, _) in sorted(
+                first_mover_data.items(),
+                key=lambda x: x[1][1]  # Sort by timestamp
+            ):
+                if uid in scores:
+                    # Check if current best needs to beat first_mover + delta
+                    required_score = first_score + delta
+                    if best_score < required_score and uid != best_uid:
+                        # Best score doesn't beat threshold, revert to first mover
+                        logger.info(
+                            f"First-mover protection: Miner {uid} (score={first_score:.3f}) "
+                            f"blocks Miner {best_uid} (score={best_score:.3f}, "
+                            f"required={required_score:.3f})"
+                        )
+                        best_uid = uid
+                        best_score = scores[uid]
+                        break
+
+        # Winner takes all
+        weights = {uid: 0.0 for uid in scores.keys()}
+        weights[best_uid] = 1.0
+
+        logger.info(
+            f"Winner-take-all: Miner {best_uid} wins with score {best_score:.3f} "
+            f"(delta threshold={delta})"
+        )
+
+        return weights
+
     def normalize_scores_to_weights(
         self,
         scores: Dict[int, float],
         temperature: float = 0.1
     ) -> Dict[int, float]:
         """Normalize miner scores to weights using softmax.
+
+        DEPRECATED: Use select_winner() for winner-take-all mechanism.
 
         Args:
             scores: Dict of miner_uid -> score [0, 1]
@@ -157,6 +215,11 @@ class TrajectoryScorer:
         Returns:
             Dict of miner_uid -> weight (sums to 1.0)
         """
+        logger.warning(
+            "normalize_scores_to_weights() is DEPRECATED. "
+            "Use select_winner() for winner-take-all mechanism."
+        )
+
         if not scores:
             return {}
 
