@@ -233,8 +233,8 @@ class ClawBenchHarness:
 
             raise ValueError("No JSON found in output")
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON output: {e}")
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Failed to parse episode output: {e}")
             logger.debug(f"Output was: {output}")
             return {
                 "score": 0.0,
@@ -242,7 +242,7 @@ class ClawBenchHarness:
                 "tool_calls": 0,
                 "response": "",
                 "rubric": {},
-                "error": f"JSON parse error: {e}"
+                "error": f"Parse error: {e}"
             }
 
     def _compute_hash(self, pack: dict) -> str:
