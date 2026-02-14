@@ -59,129 +59,81 @@ TrajectoryRL employs three layers of protection against copy-paste attacks:
 
 ## Quick Start
 
-### For Validators (Docker - Recommended)
+### For Validators
 
 ```bash
 # 1. Clone repo with submodules
 git clone --recursive https://github.com/trajectoryRL/trajectoryrl.git
 cd trajectoryrl
 
-# 2. Configure environment
+# 2. Configure
 cp .env.example .env
-# Edit: add ANTHROPIC_API_KEY, WALLET_NAME, WALLET_HOTKEY
+# Edit .env: add your ANTHROPIC_API_KEY and wallet info
 
-# 3. Start validator
-docker-compose up -d validator
+# 3. Start (launches validator + ClawBench services automatically)
+docker compose up -d
 
 # 4. View logs
-docker-compose logs -f validator
+docker compose logs -f validator
 ```
 
-> **Recommended**: Docker ensures consistent environment and automatic ClawBench version pinning (v0.3.0 / `b718230`). See [docker/README.md](docker/README.md) for full documentation.
+One command starts everything: the validator, ClawBench mock-tools, and the OpenClaw AI gateway. ClawBench is pinned to v0.3.0 (`b718230`) for validator consensus.
 
-<details>
-<summary><b>Manual Installation (Development Only)</b></summary>
+### For Miners
 
 ```bash
 # 1. Clone repo
 git clone --recursive https://github.com/trajectoryRL/trajectoryrl.git
 cd trajectoryrl
 
-# 2. Install
-pip install -e .
-
-# 3. Configure
-cp .env.example .env
-# Edit: add ANTHROPIC_API_KEY, WALLET_NAME
-
-# 4. Run validator
-python neurons/validator.py
-```
-</details>
-
-### For Miners (Docker - Recommended)
-
-```bash
-# 1. Clone repo
-git clone --recursive https://github.com/trajectoryRL/trajectoryrl.git
-cd trajectoryrl
-
-# 2. Prepare policy pack
+# 2. Create your policy pack
 mkdir -p packs
-# Create packs/pack.json with your policy
+# Write packs/pack.json (see "How It Works" below)
 
 # 3. Publish to GitHub
-cd /path/to/your/pack/repo
-git add pack.json
-git commit -m "Initial pack submission"
-git push origin main
+# In your pack repo: git add pack.json && git commit && git push
 
-# 4. Configure environment
+# 4. Configure
 cp .env.example .env
-# Edit: add PACK_REPO, PACK_COMMIT (git commit hash)
+# Edit .env: add WALLET_NAME, PACK_REPO, PACK_COMMIT
 
 # 5. Start miner
-docker-compose --profile miner up -d miner
+docker compose --profile miner up -d
 
 # 6. View logs
-docker-compose logs -f miner
+docker compose logs -f miner
 ```
-
-<details>
-<summary><b>Manual Installation</b></summary>
-
-```bash
-# 1. Install
-pip install -e .
-
-# 2. Create policy pack (see: docs/creating_packs.md)
-# 3. Publish to GitHub
-
-# 4. Run miner
-python neurons/miner.py \
-  --pack.path ./pack.json \
-  --pack.repo https://github.com/YOUR_USERNAME/YOUR_REPO \
-  --pack.commit $(git rev-parse HEAD)
-```
-</details>
 
 ## Project Structure
 
 ```
 trajectoryrl/
+├── docker-compose.yml         # All-in-one: validator + ClawBench services
+├── .env.example               # Configuration template
 ├── trajectoryrl/              # Main package
-│   ├── protocol/              # Bittensor synapses
-│   │   └── synapse.py         # PackRequest/PackResponse
-│   ├── base/                  # Core classes
-│   │   ├── miner.py           # TrajectoryMiner (TODO)
-│   │   └── validator.py       # TrajectoryValidator
-│   ├── utils/                 # Shared utilities
-│   │   ├── config.py          # Configuration
-│   │   ├── clawbench.py       # ClawBench integration
-│   │   ├── github.py          # GitHub verification
-│   │   └── opp_schema.py      # OPP v1 validation
-│   └── scoring/               # Scoring logic
-│       └── __init__.py        # Score aggregation
+│   ├── protocol/              # Bittensor synapses (PackRequest/PackResponse)
+│   ├── base/                  # Core classes (TrajectoryValidator)
+│   ├── utils/                 # ClawBench harness, config, GitHub verification
+│   └── scoring/               # Score aggregation, winner-take-all
 │
 ├── neurons/                   # Entry points
-│   ├── validator.py           # Validator node
-│   └── miner.py               # Miner node
+│   ├── validator.py           # python neurons/validator.py
+│   └── miner.py               # python neurons/miner.py
 │
-├── clawbench/                 # Git submodule (pinned to v0.3.0)
-│   ├── scenarios/             # Scenario definitions
-│   ├── fixtures/              # Mock data
-│   └── clawbench/             # Evaluation harness
-│
-├── docker/                    # Docker deployment
+├── docker/                    # Dockerfiles
 │   ├── Dockerfile.validator
-│   └── docker-compose.yml     # Includes ClawBench
+│   └── Dockerfile.miner
 │
 ├── tests/                     # Test suite
-├── docs/                      # Documentation
-├── .gitmodules                # Submodule configuration
 ├── pyproject.toml             # Package definition
 └── README.md                  # This file
 ```
+
+The `docker-compose.yml` automatically starts all required services:
+- **validator** — Evaluates miner packs and sets on-chain weights
+- **mock-tools** — Serves deterministic fixture data for ClawBench scenarios
+- **openclaw** — AI gateway that runs Claude with each pack's AGENTS.md
+- **miner** — (optional, `--profile miner`) Serves a policy pack via Bittensor
 
 ## How It Works
 

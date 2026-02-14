@@ -1,6 +1,96 @@
-version: '3.8'
+# TrajectoryRL — All-in-One Docker Compose
+#
+# Starts everything needed to run the validator:
+#   docker compose up -d
+#   docker compose logs -f validator
+#
+# Services:
+#   init          — Sets up workspace with default fixtures (runs once)
+#   mock-tools    — Serves deterministic fixture data for scenarios
+#   openclaw      — AI gateway that runs Claude with the pack's AGENTS.md
+#   validator     — Queries miners, evaluates packs via ClawBench, sets weights
+#   miner         — (optional) Serves a policy pack via Bittensor
+#
+# Required .env:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   WALLET_NAME=validator
+#   WALLET_HOTKEY=default
 
 services:
+  # --------------------------------------------------------------------------
+  # Init: populate /workspace with default scenario fixtures (runs once)
+  # --------------------------------------------------------------------------
+  init:
+    build:
+      context: ../clawbench
+      dockerfile: Dockerfile.init
+    container_name: trajectoryrl_init
+    volumes:
+      - ../clawbench/fixtures:/fixtures:ro
+      - ../clawbench/scenarios:/scenarios:ro
+      - workspace:/workspace
+    environment:
+      - SCENARIO=${SCENARIO:-client_escalation}
+      - VARIANT=${VARIANT:-optimized}
+
+  # --------------------------------------------------------------------------
+  # Mock Tools: deterministic tool responses from fixtures (:3001)
+  # --------------------------------------------------------------------------
+  mock-tools:
+    build:
+      context: ../clawbench
+      dockerfile: Dockerfile.mock-tools
+    container_name: trajectoryrl_mock_tools
+    restart: unless-stopped
+    volumes:
+      - ../clawbench/fixtures:/fixtures:ro
+    environment:
+      - FIXTURES_PATH=/fixtures
+      - SCENARIO=${SCENARIO:-client_escalation}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    networks:
+      - trajectoryrl
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # OpenClaw: AI gateway — runs Claude with AGENTS.md from /workspace
+  # --------------------------------------------------------------------------
+  openclaw:
+    build:
+      context: ../openclaw
+      dockerfile: Dockerfile.clawbench
+    container_name: trajectoryrl_openclaw
+    restart: unless-stopped
+    volumes:
+      - workspace:/workspace
+      - ../clawbench/config/openclaw.json:/home/node/.openclaw/openclaw.json:ro
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-sandbox-token-12345}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      mock-tools:
+        condition: service_healthy
+    networks:
+      - trajectoryrl
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # --------------------------------------------------------------------------
+  # Validator: queries miners, evaluates packs, sets on-chain weights
+  # --------------------------------------------------------------------------
   validator:
     build:
       context: .
@@ -8,33 +98,30 @@ services:
     container_name: trajectoryrl_validator
     restart: unless-stopped
     environment:
-      # Bittensor config
+      # Bittensor
       - WALLET_NAME=${WALLET_NAME:-validator}
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
       - NETUID=${NETUID:-11}
       - NETWORK=${NETWORK:-finney}
-      
-      # ClawBench config
+      # ClawBench integration (wired to sibling services)
       - CLAWBENCH_PATH=/app/clawbench
-      
-      # Evaluation config
+      - MOCK_TOOLS_URL=http://mock-tools:3001
+      - OPENCLAW_URL=http://openclaw:18789
+      - WORKSPACE_PATH=/workspace
+      # Evaluation
       - EPOCH_INTERVAL=${EPOCH_INTERVAL:-720}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      
-      # API keys (load from .env)
+      # API keys
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
-      # Persist Bittensor wallet
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
-      
-      # Persist logs
+      - workspace:/workspace
       - ./logs:/app/logs
-      
-      # Persist pack cache
       - /tmp/trajectoryrl_packs:/tmp/trajectoryrl_packs
-      
-      # Git cache for GitHub verification
       - ./git_cache:/app/logs/git_cache
+    depends_on:
+      mock-tools:
+        condition: service_healthy
     networks:
       - trajectoryrl
     logging:
@@ -43,6 +130,9 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # --------------------------------------------------------------------------
+  # Miner (optional): start with `docker compose --profile miner up -d`
+  # --------------------------------------------------------------------------
   miner:
     build:
       context: .
@@ -50,26 +140,17 @@ services:
     container_name: trajectoryrl_miner
     restart: unless-stopped
     environment:
-      # Bittensor config
       - WALLET_NAME=${WALLET_NAME:-miner}
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
       - NETUID=${NETUID:-11}
       - NETWORK=${NETWORK:-finney}
-      
-      # Miner config
       - PACK_PATH=${PACK_PATH:-/app/packs/pack.json}
-      - PACK_REPO=${PACK_REPO}
-      - PACK_COMMIT=${PACK_COMMIT}
-      
+      - PACK_REPO=${PACK_REPO:-}
+      - PACK_COMMIT=${PACK_COMMIT:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      # Persist Bittensor wallet
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
-      
-      # Mount policy pack
       - ./packs:/app/packs:ro
-      
-      # Persist logs
       - ./logs:/app/logs
     networks:
       - trajectoryrl
@@ -78,9 +159,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # Only start miner if explicitly enabled
     profiles:
       - miner
+
+volumes:
+  workspace:
 
 networks:
   trajectoryrl:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -39,18 +40,34 @@ class EvaluationResult:
 class ClawBenchHarness:
     """Integrates with ClawBench for policy pack evaluation."""
 
-    def __init__(self, clawbench_path: Path, timeout: int = 120):
+    def __init__(
+        self,
+        clawbench_path: Path,
+        timeout: int = 120,
+        workspace_path: Optional[Path] = None,
+    ):
         """Initialize harness.
 
         Args:
             clawbench_path: Path to clawbench directory
             timeout: Timeout in seconds for each scenario
+            workspace_path: Shared workspace directory that OpenClaw reads from.
+                If None, uses WORKSPACE_PATH env var or clawbench_path/workspace.
         """
         self.clawbench_path = clawbench_path
         self.timeout = timeout
         self.scripts_path = clawbench_path / "scripts"
         self.scenarios_path = clawbench_path / "scenarios"
         self.fixtures_path = clawbench_path / "fixtures"
+
+        # Workspace shared with OpenClaw — pack files are written here so that
+        # the OpenClaw gateway can read the updated AGENTS.md on each evaluation.
+        if workspace_path is not None:
+            self.workspace_path = workspace_path
+        else:
+            self.workspace_path = Path(
+                os.environ.get("WORKSPACE_PATH", str(clawbench_path / "workspace"))
+            )
 
         # Validate paths
         if not self.scripts_path.exists():
@@ -79,34 +96,31 @@ class ClawBenchHarness:
             f"pack_hash={self._compute_hash(pack)[:8]}"
         )
 
-        # Create temporary workspace
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
+        try:
+            # Write pack files to the shared workspace so OpenClaw can read them.
+            # OpenClaw loads AGENTS.md from this directory on each request.
+            self._apply_pack_to_workspace(pack, self.workspace_path)
 
-            try:
-                # Apply pack to workspace
-                self._apply_pack_to_workspace(pack, workspace)
+            # Run scenario
+            result = await self._run_scenario(
+                scenario_name=scenario_name,
+                workspace=self.workspace_path,
+                seed=seed
+            )
 
-                # Run scenario
-                result = await self._run_scenario(
-                    scenario_name=scenario_name,
-                    workspace=workspace,
-                    seed=seed
-                )
+            return result
 
-                return result
-
-            except Exception as e:
-                logger.error(f"Evaluation failed: {e}", exc_info=True)
-                return EvaluationResult(
-                    scenario_name=scenario_name,
-                    score=0.0,
-                    success=False,
-                    tool_calls=0,
-                    response="",
-                    rubric={},
-                    error=str(e)
-                )
+        except Exception as e:
+            logger.error(f"Evaluation failed: {e}", exc_info=True)
+            return EvaluationResult(
+                scenario_name=scenario_name,
+                score=0.0,
+                success=False,
+                tool_calls=0,
+                response="",
+                rubric={},
+                error=str(e)
+            )
 
     def _apply_pack_to_workspace(self, pack: dict, workspace: Path) -> None:
         """Write pack files to workspace directory.

@@ -22,8 +22,12 @@ RUN cd clawbench && git checkout b718230cb201fc0a4c28d12e011b1663db07d8f7
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
+# Install ClawBench scoring (needed by run_episode.py)
+RUN pip install --no-cache-dir -e ./clawbench 2>/dev/null || \
+    pip install --no-cache-dir httpx pyyaml
+
 # Create directories
-RUN mkdir -p /app/logs /tmp/trajectoryrl_packs
+RUN mkdir -p /app/logs /tmp/trajectoryrl_packs /workspace
 
 # Environment variables (override with docker-compose)
 ENV WALLET_NAME=validator
