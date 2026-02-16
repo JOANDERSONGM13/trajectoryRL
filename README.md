@@ -79,6 +79,19 @@ docker compose logs -f validator
 
 One command starts everything: the validator, ClawBench mock-tools, and the OpenClaw AI gateway. ClawBench is pinned to v0.3.0 (`b718230`) for validator consensus.
 
+### Model Selection
+
+Set `CLAWBENCH_MODEL` to change the LLM used for evaluation:
+
+```bash
+# In .env
+CLAWBENCH_MODEL=anthropic/claude-sonnet-4-5-20250929  # default
+CLAWBENCH_MODEL=ollama/llama3.3                        # local Ollama
+CLAWBENCH_MODEL=openai/gpt-4o                          # OpenAI
+```
+
+See [ClawBench Model Configuration](https://github.com/trajectoryRL/clawbench#model-configuration) for local LLM setup details.
+
 ### For Miners
 
 ```bash
